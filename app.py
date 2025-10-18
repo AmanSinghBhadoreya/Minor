@@ -9,15 +9,15 @@ import matplotlib.pyplot as plt
 import os
 
 st.set_page_config(page_title="Loan Eligibility Predictor", page_icon="🏦", layout="centered")
-
 st.title("🏦 Loan Eligibility Prediction System")
 st.subheader("An ML-based Financial Screening Tool using SVM")
 
 # -----------------------------
-# Load and preprocess dataset
+# Load dataset
 # -----------------------------
 df = pd.read_csv("data/loan_data.csv")
 
+# Encode categorical columns
 label_enc = LabelEncoder()
 for col in ['Gender','Married','Education','Self_Employed','Property_Area','Loan_Status']:
     df[col] = label_enc.fit_transform(df[col])
