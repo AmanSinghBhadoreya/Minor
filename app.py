@@ -1,8 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.svm import SVC
 import os
 
 st.set_page_config(page_title="Loan Eligibility Predictor", page_icon="🏦", layout="centered")
@@ -23,7 +21,7 @@ else:
                                'Property_Area','Loan_Status'])
 
 # -----------------------------
-# Select user type
+# User type selection
 # -----------------------------
 user_type = st.radio("Select User Type:", ["Customer / Applicant", "Bank / Admin"])
 
@@ -57,27 +55,20 @@ if user_type == "Customer / Applicant":
             'Property_Area': [property_area]
         })
 
-        # Train model if enough data exists
-        if len(df) >= 10:
-            label_enc = LabelEncoder()
-            for col in ['Gender','Married','Education','Self_Employed','Property_Area','Loan_Status']:
-                df[col] = label_enc.fit_transform(df[col])
-            X = df.drop('Loan_Status', axis=1)
-            y = df['Loan_Status']
-            scaler = StandardScaler()
-            X_scaled = scaler.fit_transform(X)
-            model = SVC(kernel='rbf', probability=True, random_state=42)
-            model.fit(X_scaled, y)
+        # -----------------------------
+        # Simulated prediction logic
+        # -----------------------------
+        # You can replace this with SVM locally
+        score = 0
+        if credit_history == 1:
+            score += 2
+        if applicant_income > 5000:
+            score += 1
+        if loan_amount < 200:
+            score += 1
 
-            # Encode and scale input
-            for col in ['Gender','Married','Education','Self_Employed','Property_Area']:
-                input_data[col] = label_enc.transform(input_data[col])
-            scaled_input = scaler.transform(input_data)
-            pred = model.predict(scaled_input)[0]
-            proba = model.predict_proba(scaled_input)[0][pred]
-        else:
-            pred = np.random.choice([0,1])
-            proba = np.random.uniform(0.5, 1.0)
+        pred = 1 if score >= 3 else 0
+        proba = min(0.95, 0.5 + 0.15*score)
 
         result = "✅ Loan Approved" if pred == 1 else "❌ Loan Rejected"
         st.success(f"**Prediction:** {result}")
