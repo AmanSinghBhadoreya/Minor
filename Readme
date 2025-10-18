@@ -1,0 +1,12 @@
+# Loan Eligibility Prediction using SVM
+
+A professional banking-style ML project that predicts loan eligibility based on applicant data using Support Vector Machine (SVM).
+
+## Features
+- Real-time predictions
+- Confidence score
+- SHAP explainable AI visualization
+- Prediction history logging
+- Clean Streamlit interface
+
+## Run Locally
