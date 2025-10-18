@@ -1,0 +1,21 @@
+# Professional Loan Eligibility Prediction System
+
+This project is a **Machine Learning / Banking Logic-based Loan Eligibility Prediction System** built with Streamlit.
+
+## Features
+
+- Applicant login via Email + OTP (demo mode)
+- Bank Admin login with pre-set email
+- Realistic banking scoring:
+  - Debt-to-Income Ratio (DTI)
+  - Loan-to-Value Ratio (LTV)
+  - Income weighting (log scale)
+  - Credit history, property area, loan term adjustments
+- Admin Dashboard: tables, charts, CSV download
+- CSV logging of all enquiries
+
+## Deployment
+
+1. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
