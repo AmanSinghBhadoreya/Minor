@@ -1,0 +1,10 @@
+# Deployment Guide — Streamlit Cloud
+
+1. Go to https://share.streamlit.io or https://streamlit.io/cloud
+2. Sign in using your GitHub account.
+3. Click “New app”.
+4. Connect your GitHub repository or upload this folder as a repo.
+5. Set entry point as app.py
+6. Streamlit Cloud will automatically install dependencies.
+7. Once deployed, you’ll get a live URL like:
+   https://yourname-loan-predictor.streamlit.app
