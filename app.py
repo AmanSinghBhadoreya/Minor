@@ -5,289 +5,168 @@ import numpy as np
 import os
 import uuid
 from datetime import datetime
+from sklearn.svm import SVC
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
 import plotly.express as px
 
-st.set_page_config(page_title="Professional Loan Eligibility System", page_icon="🏦", layout="wide")
-
+# ---------------- CONFIG ----------------
+st.set_page_config(page_title="FinAI — Smart Loan Predictor", layout="wide")
 DATA_DIR = "data"
-DATA_FILE = os.path.join(DATA_DIR, "loan_enquiries.csv")
-OTP_FILE = os.path.join(DATA_DIR, "otps.csv")
-ADMIN_EMAILS = ["bankadmin@bankdemo.com"]  # Add admin emails here
-
+APPLICANTS_CSV = os.path.join(DATA_DIR,"loan_applicants.csv")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# Initialize files if missing
-if not os.path.exists(DATA_FILE):
-    cols = [
-        "id", "timestamp", "user_email", "gender", "married", "education",
-        "self_employed", "applicant_income", "coapplicant_income", "loan_amount",
-        "loan_term", "interest_rate", "credit_history", "property_area", "property_value",
-        "loan_status", "score", "confidence", "explanation"
-    ]
-    pd.DataFrame(columns=cols).to_csv(DATA_FILE, index=False)
+# ---------------- CREATE CSV IF NOT EXIST ----------------
+if not os.path.exists(APPLICANTS_CSV):
+    cols = ["id","timestamp","name","email_or_phone","mode","gender","married","education",
+            "employment_type","applicant_income","coapplicant_income","loan_amount","loan_term_months",
+            "interest_rate","other_monthly_debt","property_value","credit_history",
+            "score","confidence","decision","breakdown"]
+    pd.DataFrame(columns=cols).to_csv(APPLICANTS_CSV,index=False)
 
-if not os.path.exists(OTP_FILE):
-    pd.DataFrame(columns=["email", "otp", "created_at"]).to_csv(OTP_FILE, index=False)
+# ---------------- HELPER FUNCTIONS ----------------
+def emi_monthly(P, annual_rate, months):
+    r = annual_rate/12/100
+    if r==0: return P/months
+    return (P*r*(1+r)**months)/((1+r)**months-1)
 
-# ---------------------------
-# Utilities
-# ---------------------------
-def generate_otp():
-    return str(np.random.randint(100000, 999999))
+def compute_dti(emi, other_debt, income):
+    return (emi + other_debt)/max(income,1)
 
-def send_otp_simulated(email):
-    otp = generate_otp()
-    rec = {"email": email, "otp": otp, "created_at": datetime.utcnow().isoformat()}
-    df = pd.read_csv(OTP_FILE)
-    df = pd.concat([df, pd.DataFrame([rec])], ignore_index=True)
-    df.to_csv(OTP_FILE, index=False)
-    return otp
+def compute_ltv(loan_amount, property_value):
+    return loan_amount/max(property_value,1)
 
-def verify_otp(email, otp_input):
-    df = pd.read_csv(OTP_FILE)
-    rows = df[(df["email"] == email) & (df["otp"] == otp_input)]
-    return len(rows) > 0
+def compute_score(features):
+    # Banking formulas
+    emi = emi_monthly(features["loan_amount"], features["interest_rate"], features["loan_term_months"])
+    dti = compute_dti(emi, features.get("other_monthly_debt",0), features["applicant_income"]+features["coapplicant_income"])
+    ltv = compute_ltv(features["loan_amount"], features.get("property_value",features["loan_amount"]*1.2))
+    income_score = np.log1p(features["applicant_income"]+features["coapplicant_income"])/np.log1p(200000)*20
+    credit_score = 30 if features.get("credit_history",0)==1 else 0
+    emp_score = 3 if features.get("employment_type","Salaried").lower()=="salaried" else 0
+    dti_score = 25 if dti<=0.35 else 10 if dti<=0.45 else 0
+    ltv_score = 15 if ltv<=0.7 else 5 if ltv<=0.9 else 0
+    raw = income_score+credit_score+emp_score+dti_score+ltv_score
+    score = min(100,max(0,raw))
+    confidence = min(0.98,0.55 + (score/100)*0.40)
+    breakdown = {"emi":round(emi,2),"dti":round(dti,2),"ltv":round(ltv,2),
+                 "income_score":round(income_score,2),"credit_score_component":credit_score,
+                 "employment_component":emp_score,"dti_component":dti_score,"ltv_component":ltv_score,
+                 "raw_sum":round(raw,2)}
+    return round(score,2), round(confidence,2), breakdown
 
-def append_enquiry(record: dict):
-    df = pd.read_csv(DATA_FILE)
-    df = pd.concat([df, pd.DataFrame([record])], ignore_index=True)
-    df.to_csv(DATA_FILE, index=False)
+def save_application(rec):
+    df = pd.read_csv(APPLICANTS_CSV)
+    df = pd.concat([df,pd.DataFrame([rec])],ignore_index=True)
+    df.to_csv(APPLICANTS_CSV,index=False)
 
-def load_enquiries():
-    return pd.read_csv(DATA_FILE)
+def train_model(df):
+    X = df[["applicant_income","coapplicant_income","loan_amount","loan_term_months","interest_rate","other_monthly_debt","property_value","credit_history"]]
+    y = (df["score"]>=55).astype(int)
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    svm = SVC(probability=True)
+    lr = LogisticRegression()
+    # Hybrid: average probability
+    svm.fit(X_scaled,y)
+    lr.fit(X_scaled,y)
+    return {"svm":svm,"lr":lr,"scaler":scaler}
 
-def human_time(ts):
-    try:
-        return datetime.fromisoformat(ts).strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return ts
+def predict_loan(model, features):
+    X = np.array([[features["applicant_income"],features["coapplicant_income"],features["loan_amount"],
+                   features["loan_term_months"],features["interest_rate"],features.get("other_monthly_debt",0),
+                   features.get("property_value",features["loan_amount"]*1.2),features.get("credit_history",1)]])
+    X_scaled = model["scaler"].transform(X)
+    prob_svm = model["svm"].predict_proba(X_scaled)[0][1]
+    prob_lr = model["lr"].predict_proba(X_scaled)[0][1]
+    prob = (prob_svm+prob_lr)/2
+    decision = "APPROVED" if prob>=0.55 else "REJECTED"
+    return round(prob*100,2), decision
 
-# ---------------------------
-# Authentication UI
-# ---------------------------
-def auth_ui():
-    st.sidebar.header("Account")
-    if "auth_email" not in st.session_state:
-        st.session_state.auth_email = ""
-    if "auth_role" not in st.session_state:
-        st.session_state.auth_role = None
-    if "auth_ok" not in st.session_state:
-        st.session_state.auth_ok = False
+# ---------------- SIDEBAR LOGIN ----------------
+st.sidebar.header("Login Portal")
+mode = st.sidebar.selectbox("Mode",["Applicant","Bank Admin"])
+if mode=="Applicant":
+    login_mode = st.sidebar.radio("Login via",["Email","Phone"])
+    email_or_phone = st.sidebar.text_input(f"{login_mode}")
+    otp = st.sidebar.text_input("Enter OTP (mock, 6 digits)")
+    if st.sidebar.button("Verify"):
+        if email_or_phone.strip()!="" and otp.strip()!="":
+            st.session_state["app_authenticated"]=True
+            st.session_state["app_user"]=email_or_phone
+            st.sidebar.success("Login successful")
+        else:
+            st.sidebar.error("Enter login and OTP")
+elif mode=="Bank Admin":
+    admin_pass = st.sidebar.text_input("Admin Password", type="password")
+    if st.sidebar.button("Login"):
+        if admin_pass=="FinAIAdmin123":
+            st.session_state["admin_authenticated"]=True
+            st.sidebar.success("Admin login successful")
+        else:
+            st.sidebar.error("Wrong password")
 
-    if not st.session_state.auth_ok:
-        mode = st.sidebar.selectbox("I am a", ["Applicant", "Bank Admin"])
-        email = st.sidebar.text_input("Email", value=st.session_state.auth_email, placeholder="you@example.com")
-        st.session_state.auth_email = email
-        if st.sidebar.button("Send OTP"):
-            if email.strip() == "":
-                st.sidebar.error("Enter a valid email.")
-            else:
-                otp = send_otp_simulated(email)
-                st.sidebar.success(f"OTP sent to {email} (simulated).")
-                if st.sidebar.checkbox("Show OTP (demo only)"):
-                    st.sidebar.info(f"OTP: {otp}")
-        otp_input = st.sidebar.text_input("Enter OTP (6 digits)")
-        if st.sidebar.button("Verify OTP"):
-            if verify_otp(email, otp_input):
-                st.session_state.auth_ok = True
-                st.session_state.auth_role = "admin" if email in ADMIN_EMAILS else "applicant"
-                st.sidebar.success("Logged in successfully.")
-                st.session_state.last_login = datetime.utcnow().isoformat()
-            else:
-                st.sidebar.error("Invalid OTP. Try again.")
+# ---------------- MAIN ----------------
+st.title("FinAI — Smart Loan Predictor")
+
+if mode=="Applicant" and st.session_state.get("app_authenticated",False):
+    st.header("Loan Application Form")
+    with st.form("loan_form"):
+        cols = st.columns(3)
+        name = cols[0].text_input("Full Name")
+        gender = cols[0].selectbox("Gender",["Male","Female","Other"])
+        married = cols[0].selectbox("Married",["Yes","No"])
+        education = cols[0].selectbox("Education",["Graduate","Not Graduate"])
+        employment_type = cols[1].selectbox("Employment Type",["Salaried","Self-Employed","Unemployed"])
+        applicant_income = cols[1].number_input("Applicant Monthly Income (₹)",min_value=0.0,value=25000.0)
+        coapplicant_income = cols[1].number_input("Co-Applicant Monthly Income (₹)",min_value=0.0,value=0.0)
+        loan_amount = cols[2].number_input("Loan Amount (₹)",min_value=10000.0,value=500000.0)
+        loan_term_years = cols[2].selectbox("Loan Term (Years)",[5,10,15,20,25,30])
+        loan_term_months = int(loan_term_years*12)
+        interest_rate = cols[2].number_input("Interest Rate (%)",min_value=0.0,value=7.5)
+        other_debt = cols[2].number_input("Other Monthly Liabilities (₹)",min_value=0.0,value=0.0)
+        property_value = st.number_input("Property Value (₹)",min_value=0.0,value=700000.0)
+        credit_history = st.selectbox("Credit History (1=Good,0=Poor)",[1,0])
+        submitted = st.form_submit_button("Submit Application")
+
+    if submitted:
+        features = {"applicant_income":float(applicant_income),"coapplicant_income":float(coapplicant_income),
+                    "loan_amount":float(loan_amount),"loan_term_months":loan_term_months,
+                    "interest_rate":float(interest_rate),"other_monthly_debt":float(other_debt),
+                    "property_value":float(property_value),"credit_history":int(credit_history),
+                    "employment_type":employment_type}
+        score, confidence, breakdown = compute_score(features)
+        decision = "APPROVED" if score>=55 else "REJECTED"
+        st.subheader(f"Decision: {decision}  —  Score: {score}/100")
+        st.metric("Confidence",f"{int(confidence*100)}%")
+        st.json(breakdown)
+        rec = {"id":str(uuid.uuid4()),"timestamp":datetime.utcnow().isoformat(),"name":name,
+               "email_or_phone":st.session_state.get("app_user","unknown"),"mode":login_mode,
+               "gender":gender,"married":married,"education":education,"employment_type":employment_type,
+               "applicant_income":applicant_income,"coapplicant_income":coapplicant_income,
+               "loan_amount":loan_amount,"loan_term_months":loan_term_months,"interest_rate":interest_rate,
+               "other_monthly_debt":other_debt,"property_value":property_value,"credit_history":credit_history,
+               "score":score,"confidence":confidence,"decision":decision,"breakdown":str(breakdown)}
+        save_application(rec)
+        st.success("Application saved successfully!")
+
+elif mode=="Bank Admin" and st.session_state.get("admin_authenticated",False):
+    st.header("Bank Admin Dashboard")
+    df = pd.read_csv(APPLICANTS_CSV)
+    if df.empty:
+        st.info("No applications yet")
     else:
-        role = st.session_state.auth_role
-        st.sidebar.success(f"Logged in as: {st.session_state.auth_email} ({role})")
-        if st.sidebar.button("Logout"):
-            st.session_state.auth_ok = False
-            st.session_state.auth_email = ""
-            st.session_state.auth_role = None
-            st.experimental_rerun()
+        total=len(df); approved=len(df[df["decision"]=="APPROVED"]); rejected=total-approved
+        c1,c2,c3=st.columns(3); c1.metric("Total Applications",total); c2.metric("Approved",approved); c3.metric("Rejected",rejected)
+        st.subheader("Applications Table")
+        st.dataframe(df[["timestamp","name","email_or_phone","applicant_income","coapplicant_income","loan_amount","decision"]])
+        st.subheader("Plots")
+        fig = px.scatter(df, x="applicant_income", y="loan_amount", color="decision", hover_data=["name"])
+        st.plotly_chart(fig, use_container_width=True)
+        fig2 = px.histogram(df, x="score", nbins=20, color="decision")
+        st.plotly_chart(fig2, use_container_width=True)
 
-# ---------------------------
-# Banking Formula-based Loan Scoring
-# ---------------------------
-def compute_loan_score(features: dict):
-    """
-    Compute realistic loan score using banking formulas:
-    DTI, LTV, Income weighting, Credit history, Term, Property area.
-    """
-    score = 0.0
-    explanation = {}
-
-    # Credit history weight
-    if features["credit_history"] == 1:
-        score += 30
-        explanation["credit_history"] = "+30 (good credit)"
-    else:
-        explanation["credit_history"] = "+0 (poor credit)"
-
-    # Debt-to-Income Ratio (DTI)
-    monthly_rate = features["interest_rate"]/12/100
-    n = features["loan_term"]
-    emi = (features["loan_amount"] * 1000 * monthly_rate * (1 + monthly_rate)**n) / ((1 + monthly_rate)**n - 1)
-    total_income = features["applicant_income"] + features["coapplicant_income"]
-    dti = emi / total_income
-    if dti <= 0.4:
-        score += 25
-        explanation["DTI"] = f"+25 (DTI={dti:.2f} ≤ 0.4)"
-    elif dti <= 0.6:
-        score += 10
-        explanation["DTI"] = f"+10 (DTI={dti:.2f})"
-    else:
-        explanation["DTI"] = f"+0 (DTI={dti:.2f} high)"
-
-    # Loan-to-Value Ratio (LTV)
-    ltv = features["loan_amount"]*1000 / features["property_value"]
-    if ltv <= 0.8:
-        score += 15
-        explanation["LTV"] = f"+15 (LTV={ltv:.2f} ≤ 0.8)"
-    elif ltv <= 0.9:
-        score += 5
-        explanation["LTV"] = f"+5 (LTV={ltv:.2f})"
-    else:
-        explanation["LTV"] = f"+0 (LTV={ltv:.2f} high)"
-
-    # Income weighting
-    income_score = np.log(features["applicant_income"]+1) + 0.5*np.log(features["coapplicant_income"]+1)
-    score += income_score
-    explanation["IncomeScore"] = f"+{income_score:.2f} (log scaled)"
-
-    # Term adjustment
-    term_adj = 0.02 * (n/12)
-    score += term_adj
-    explanation["TermAdj"] = f"+{term_adj:.2f} (longer term)"
-
-    # Property area adjustment
-    if features["property_area"] == "Urban":
-        score += 3
-        explanation["PropertyArea"] = "+3 (urban)"
-    elif features["property_area"] == "Semiurban":
-        score += 1.5
-        explanation["PropertyArea"] = "+1.5 (semiurban)"
-    else:
-        explanation["PropertyArea"] = "+0 (rural)"
-
-    # Self-employed & education minor adjustment
-    if features["self_employed"] == "No":
-        score += 3
-        explanation["Employment"] = "+3 (salaried)"
-    else:
-        explanation["Employment"] = "+0 (self-employed)"
-    if features["education"] == "Graduate":
-        score += 2
-        explanation["Education"] = "+2 (graduate)"
-    else:
-        explanation["Education"] = "+0 (not graduate)"
-
-    # Normalize score 0-100
-    raw_score = min(95, score)
-    confidence = 0.6 + (raw_score/100)*0.35
-    confidence = min(0.99, confidence)
-
-    return int(raw_score), float(confidence), explanation
-
-# ---------------------------
-# Main UI
-# ---------------------------
-def main():
-    st.markdown("<h2 style='color:#003366'>Professional Loan Eligibility System</h2>", unsafe_allow_html=True)
-
-    auth_ui()
-    if "auth_ok" not in st.session_state or not st.session_state.auth_ok:
-        st.info("Login from sidebar to continue. Use OTP reveal for demo.")
-        return
-
-    user_email = st.session_state.auth_email
-    role = st.session_state.auth_role
-
-    if role == "applicant":
-        st.header("Apply for Loan")
-        with st.form("loan_form"):
-            gender = st.selectbox("Gender", ["Male", "Female"])
-            married = st.selectbox("Married", ["Yes", "No"])
-            education = st.selectbox("Education", ["Graduate", "Not Graduate"])
-            self_employed = st.selectbox("Self Employed", ["No", "Yes"])
-            applicant_income = st.number_input("Applicant Income (₹)", value=20000)
-            coapplicant_income = st.number_input("Co-applicant Income (₹)", value=0)
-            loan_amount = st.number_input("Loan Amount (₹)", value=500000)
-            loan_term = st.selectbox("Loan Term (months)", [120,180,240,300,360])
-            interest_rate = st.number_input("Interest Rate (%)", value=7.5)
-            credit_history = st.selectbox("Credit History (1=good,0=poor)", [1,0])
-            property_area = st.selectbox("Property Area", ["Urban","Semiurban","Rural"])
-            property_value = st.number_input("Estimated Property Value (₹)", value=700000)
-            submitted = st.form_submit_button("Submit")
-
-        if submitted:
-            features = {
-                "applicant_income": applicant_income,
-                "coapplicant_income": coapplicant_income,
-                "loan_amount": loan_amount/1000,  # thousands
-                "loan_term": loan_term,
-                "interest_rate": interest_rate,
-                "credit_history": credit_history,
-                "property_area": property_area,
-                "property_value": property_value,
-                "self_employed": self_employed,
-                "education": education
-            }
-            score, confidence, explanation = compute_loan_score(features)
-            approved = score >= 50
-            status = "Y" if approved else "N"
-            ts = datetime.utcnow().isoformat()
-            rec = {
-                "id": str(uuid.uuid4()),
-                "timestamp": ts,
-                "user_email": user_email,
-                "gender": gender,
-                "married": married,
-                "education": education,
-                "self_employed": self_employed,
-                "applicant_income": applicant_income,
-                "coapplicant_income": coapplicant_income,
-                "loan_amount": loan_amount/1000,
-                "loan_term": loan_term,
-                "interest_rate": interest_rate,
-                "credit_history": credit_history,
-                "property_area": property_area,
-                "property_value": property_value,
-                "loan_status": status,
-                "score": score,
-                "confidence": round(confidence,4),
-                "explanation": "; ".join([f"{k}:{v}" for k,v in explanation.items()])
-            }
-            append_enquiry(rec)
-
-            st.markdown(f"### Result: {'APPROVED ✅' if approved else 'REJECTED ❌'}")
-            st.write(f"Score: {score}/100 | Confidence: {confidence*100:.1f}%")
-            st.write("Explanation of contributing factors:")
-            st.table(pd.DataFrame(list(explanation.items()), columns=["Factor","Contribution"]))
-
-    elif role == "admin":
-        st.header("Bank / Admin Dashboard")
-        df = load_enquiries()
-        if df.empty:
-            st.info("No enquiries yet.")
-            return
-        df["timestamp_readable"] = df["timestamp"].apply(human_time)
-        st.dataframe(df[[
-            "timestamp_readable", "user_email","applicant_income","coapplicant_income",
-            "loan_amount","loan_term","credit_history","property_area","loan_status","score","confidence"
-        ]])
-
-        st.markdown("### Loan Approval Distribution")
-        fig = px.pie(df, names="loan_status", title="Approved vs Rejected")
-        st.plotly_chart(fig)
-
-        st.markdown("### Loan Score Histogram")
-        fig2 = px.histogram(df, x="score", nbins=20, title="Score Distribution")
-        st.plotly_chart(fig2)
-
-        csv_exp = df.to_csv(index=False).encode('utf-8')
-        st.download_button("Download Full Enquiries CSV", data=csv_exp, file_name="loan_enquiries.csv")
-
-# ---------------------------
-# Run App
-# ---------------------------
-if __name__ == "__main__":
-    main()
+else:
+    st.info("Login to continue")
